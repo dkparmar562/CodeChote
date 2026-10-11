@@ -1,0 +1,172 @@
+name: Codechote
+options:
+  bundleIdPrefix: dev.codechote
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+packages:
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel
+    from: 0.12.1
+  SwiftNIO:
+    url: https://github.com/apple/swift-nio.git
+    from: 2.81.0
+  SwiftCrypto:
+    url: https://github.com/apple/swift-crypto.git
+    from: 3.12.3
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    from: 1.20.0
+  NIOSSHFork:
+    url: https://github.com/Wellz26/swift-nio-ssh.git
+    from: 0.3.4
+    # must match Citadel's dependency
+targets:
+  Codechote:
+    type: application
+    platform: iOS
+    sources:
+      - Codechote
+      - Shared
+      - path: Resources/vscode-web
+        type: folder
+        buildPhase: resources
+      - path: WindowsScripts
+        type: folder
+        buildPhase: resources
+      - path: Resources/novnc
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: CodechoteWidgets
+      - target: CodechoteShare
+      - package: SwiftNIO
+        product: NIOHTTP1
+      - package: SwiftNIO
+        product: NIOWebSocket
+      - package: Citadel
+      - package: SwiftNIO
+        product: NIOCore
+      - package: SwiftNIO
+        product: NIOPosix
+      - package: NIOSSHFork
+        product: NIOSSH
+      - package: SwiftCrypto
+        product: Crypto
+      - package: SwiftTerm
+    info:
+      path: Codechote/Info.plist
+      properties:
+        CFBundleDisplayName: Codechote
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          # The browser tab opens any site, including plain-http ones; the rest of the app uses https or SSH.
+          NSAllowsArbitraryLoadsInWebContent: true
+        NSFaceIDUsageDescription: Unlock saved SSH connections.
+        # Agents working or waiting on you, on the Lock Screen and in the Dynamic Island.
+        NSSupportsLiveActivities: true
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.codechote.app
+            CFBundleURLSchemes: [codechote]
+        # Service workers only run in WKWebView for app-bound domains, and every VS Code webview
+        # (Claude Code, Codex, Markdown preview, ...) depends on one. The hostname must not be an IP.
+        WKAppBoundDomains:
+          - localhost
+          - vscode-cdn.net
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.codechote.app
+        # The app group lets the Share extension hand what was shared to the app.
+        CODE_SIGN_ENTITLEMENTS: Codechote/Codechote.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: H9NR8KWKM9
+  CodechoteWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Codechote
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.codechote.app.widgets
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: H9NR8KWKM9
+        SKIP_INSTALL: YES
+  CodechoteShare:
+    type: app-extension
+    platform: iOS
+    sources: [Share, Shared/SharedInbox.swift]
+    info:
+      path: Share/Info.plist
+      properties:
+        CFBundleDisplayName: Codechote
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsImageWithMaxCount: 10
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.codechote.app.share
+        CODE_SIGN_ENTITLEMENTS: Share/Share.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: H9NR8KWKM9
+        SKIP_INSTALL: YES
+  CodechoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: Codechote
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Codechote.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Codechote
+        BUNDLE_LOADER: $(TEST_HOST)
+  CodechoteUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Codechote
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Codechote
+schemes:
+  # Unit tests (and, with the test host, integration tests): fast, run on every change.
+  Codechote:
+    build:
+      targets:
+        Codechote: all
+        CodechoteTests: [test]
+    test:
+      targets: [CodechoteTests]
+  # End-to-end UI tests: the app driven like a person would, against the local test host.
+  CodechoteUI:
+    build:
+      targets:
+        Codechote: all
+        CodechoteUITests: [test]
+    test:
+      targets: [CodechoteUITests]

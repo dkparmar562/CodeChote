@@ -1,0 +1,603 @@
+diff --git a/src/vs/workbench/browser/layout.ts b/src/vs/workbench/browser/layout.ts
+index 75f9238fd75..28d65ca0b9c 100644
+--- a/src/vs/workbench/browser/layout.ts
++++ b/src/vs/workbench/browser/layout.ts
+@@ -50,6 +50,7 @@ import { AuxiliaryBarPart } from './parts/auxiliarybar/auxiliaryBarPart.js';
+ import { ITelemetryService } from '../../platform/telemetry/common/telemetry.js';
+ import { IAuxiliaryWindowService } from '../services/auxiliaryWindow/browser/auxiliaryWindowService.js';
+ import { CodeWindow, mainWindow } from '../../base/browser/window.js';
++import { IMobileLayoutService, MobileDestination, PHONE_MAX_WIDTH } from '../services/layout/browser/mobileLayoutService.js';
+ import { localize } from '../../nls.js';
+ 
+ //#region Layout Implementation
+@@ -153,7 +154,7 @@ export const TITLE_BAR_SETTINGS = [
+ const DEFAULT_EMPTY_WINDOW_DIMENSIONS = new Dimension(DEFAULT_EMPTY_WINDOW_SIZE.width, DEFAULT_EMPTY_WINDOW_SIZE.height);
+ const DEFAULT_WORKSPACE_WINDOW_DIMENSIONS = new Dimension(DEFAULT_WORKSPACE_WINDOW_SIZE.width, DEFAULT_WORKSPACE_WINDOW_SIZE.height);
+ 
+-export abstract class Layout extends Disposable implements IWorkbenchLayoutService {
++export abstract class Layout extends Disposable implements IWorkbenchLayoutService, IMobileLayoutService {
+ 
+ 	declare readonly _serviceBrand: undefined;
+ 
+@@ -1919,7 +1920,8 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
+ 
+ 		// The editor and panel cannot be hidden at the same time
+ 		// unless we have a maximized auxiliary bar
+-		if (hidden && !this.isVisible(Parts.PANEL_PART) && !this.isAuxiliaryBarMaximized()) {
++		// (on a phone only one part is shown at a time, so this does not apply there)
++		if (hidden && !this.isVisible(Parts.PANEL_PART) && !this.isAuxiliaryBarMaximized() && !this.isPhoneLayout) {
+ 			this.setPanelHidden(false, true);
+ 		}
+ 	}
+@@ -2166,6 +2168,66 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
+ 		}
+ 	}
+ 
++	//#region Phone layout
++
++	private readonly _onDidChangeMobileDestination = this._register(new Emitter<MobileDestination | undefined>());
++	readonly onDidChangeMobileDestination = this._onDidChangeMobileDestination.event;
++
++	private _isPhoneLayout: boolean | undefined;
++	private _mobileDestination: MobileDestination | undefined;
++
++	/**
++	 * Decided once, from the viewport at startup: crossing the breakpoint later does not
++	 * rebuild the workbench, like the Agents Window's part factories.
++	 */
++	get isPhoneLayout(): boolean {
++		if (this._isPhoneLayout === undefined) {
++			this._isPhoneLayout = isWeb && mainWindow.innerWidth <= PHONE_MAX_WIDTH && !/[?&]phone=0\b/.test(mainWindow.location.search);
++		}
++		return this._isPhoneLayout;
++	}
++
++	get mobileDestination(): MobileDestination | undefined {
++		return this._mobileDestination;
++	}
++
++	setMobileDestination(destination: MobileDestination): void {
++		if (!this.workbenchGrid || !this.isPhoneLayout) {
++			return;
++		}
++
++		// Reuse the regular show/hide paths so layout state, CSS classes and the active view
++		// containers stay consistent. Show the target first so there is always something visible.
++		if (this.isAuxiliaryBarMaximized()) {
++			this.setAuxiliaryBarMaximized(false);
++		}
++		if (this.isPanelMaximized()) {
++			this.toggleMaximizedPanel();
++		}
++
++		const showEditor = destination === 'editor';
++		const showSideBar = destination === 'sidebar';
++		const showPanel = destination === 'panel';
++		const showAuxiliaryBar = destination === 'auxiliarybar';
++
++		this._mobileDestination = destination;
++
++		if (showSideBar) { this.setSideBarHidden(false); }
++		if (showEditor) { this.setEditorHidden(false); }
++		if (showPanel) { this.setPanelHidden(false, true); }
++		if (showAuxiliaryBar) { this.setAuxiliaryBarHidden(false, true); }
++
++		if (!showSideBar) { this.setSideBarHidden(true); }
++		if (!showPanel) { this.setPanelHidden(true, true); }
++		if (!showAuxiliaryBar) { this.setAuxiliaryBarHidden(true, true); }
++		if (!showEditor) { this.setEditorHidden(true); }
++
++		this._onDidChangeMobileDestination.fire(destination);
++		this.layout();
++	}
++
++	//#endregion
++
+ 	private inMaximizedAuxiliaryBarTransition = false;
+ 
+ 	isAuxiliaryBarMaximized(): boolean {
+diff --git a/src/vs/workbench/browser/workbench.ts b/src/vs/workbench/browser/workbench.ts
+index 5fcc390818e..3618b69a7a8 100644
+--- a/src/vs/workbench/browser/workbench.ts
++++ b/src/vs/workbench/browser/workbench.ts
+@@ -16,6 +16,7 @@ import { IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions } fr
+ import { IEditorFactoryRegistry, EditorExtensions } from '../common/editor.js';
+ import { getSingletonServiceDescriptors } from '../../platform/instantiation/common/extensions.js';
+ import { Position, Parts, IWorkbenchLayoutService, positionToString } from '../services/layout/browser/layoutService.js';
++import { IMobileLayoutService } from '../services/layout/browser/mobileLayoutService.js';
+ import { IStorageService, WillSaveStateReason, StorageScope, StorageTarget } from '../../platform/storage/common/storage.js';
+ import { IConfigurationChangeEvent, IConfigurationService } from '../../platform/configuration/common/configuration.js';
+ import { IInstantiationService } from '../../platform/instantiation/common/instantiation.js';
+@@ -173,6 +174,7 @@ export class Workbench extends Layout {
+ 
+ 		// Layout Service
+ 		serviceCollection.set(IWorkbenchLayoutService, this);
++		serviceCollection.set(IMobileLayoutService, this);
+ 
+ 		// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 		//
+diff --git a/src/vs/workbench/contrib/mobile/browser/mobile.contribution.ts b/src/vs/workbench/contrib/mobile/browser/mobile.contribution.ts
+new file mode 100644
+index 00000000000..ab413cd4025
+--- /dev/null
++++ b/src/vs/workbench/contrib/mobile/browser/mobile.contribution.ts
+@@ -0,0 +1,9 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
++import { MobileDestinations } from './mobileDestinations.js';
++
++registerWorkbenchContribution2('workbench.contrib.mobileDestinations', MobileDestinations, WorkbenchPhase.BlockRestore);
+diff --git a/src/vs/workbench/contrib/mobile/browser/mobileDestinations.ts b/src/vs/workbench/contrib/mobile/browser/mobileDestinations.ts
+new file mode 100644
+index 00000000000..cb25d1a6a18
+--- /dev/null
++++ b/src/vs/workbench/contrib/mobile/browser/mobileDestinations.ts
+@@ -0,0 +1,279 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { mainWindow } from '../../../../base/browser/window.js';
++import { RunOnceScheduler } from '../../../../base/common/async.js';
++import { Disposable } from '../../../../base/common/lifecycle.js';
++import { FileAccess } from '../../../../base/common/network.js';
++import { ThemeIcon } from '../../../../base/common/themables.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { IWorkbenchContribution } from '../../../common/contributions.js';
++import { IViewDescriptorService, ViewContainer, ViewContainerLocation } from '../../../common/views.js';
++import { IEditorService } from '../../../services/editor/common/editorService.js';
++import { ILifecycleService, LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
++import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
++import { IMobileLayoutService, MobileDestination } from '../../../services/layout/browser/mobileLayoutService.js';
++import { nativeResourcePicker } from '../../../services/dialogs/browser/nativeResourcePicker.js';
++import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
++import { IThemeService } from '../../../../platform/theme/common/themeService.js';
++
++/**
++ * One entry in the phone navigation. The native app draws the bottom bar and the full list; this
++ * side only reports what exists and switches to whatever the app asks for.
++ */
++interface IDestination {
++	readonly id: string;
++	readonly title: string;
++	readonly group: 'core' | 'sidebar' | 'panel' | 'agents' | 'files';
++	/** Codicon id, when the container uses a built-in icon. */
++	readonly symbol?: string;
++	/** PNG data URL, when the container ships its own icon. */
++	icon?: string;
++}
++
++interface INativeHost {
++	postMessage(message: unknown): void;
++}
++
++const EDITOR_ID = 'editor';
++const CONTAINER_PREFIX = 'container:';
++const FILE_PREFIX = 'file:';
++
++const LOCATION_INFO: ReadonlyArray<{ location: ViewContainerLocation; key: string; destination: MobileDestination; group: IDestination['group'] }> = [
++	{ location: ViewContainerLocation.Sidebar, key: 'sidebar', destination: 'sidebar', group: 'sidebar' },
++	{ location: ViewContainerLocation.Panel, key: 'panel', destination: 'panel', group: 'panel' },
++	{ location: ViewContainerLocation.AuxiliaryBar, key: 'auxiliarybar', destination: 'auxiliarybar', group: 'agents' },
++];
++
++export class MobileDestinations extends Disposable implements IWorkbenchContribution {
++
++	private readonly iconCache = new Map<string, Promise<string | undefined>>();
++	private readonly publishScheduler = this._register(new RunOnceScheduler(() => this.publish(), 150));
++	private destinations: IDestination[] = [];
++	private lastActive: string | undefined;
++
++	constructor(
++		@IMobileLayoutService private readonly mobileLayoutService: IMobileLayoutService,
++		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
++		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService,
++		@IViewDescriptorService private readonly viewDescriptorService: IViewDescriptorService,
++		@ICommandService private readonly commandService: ICommandService,
++		@IEditorService private readonly editorService: IEditorService,
++		@ILifecycleService private readonly lifecycleService: ILifecycleService,
++		@IThemeService private readonly themeService: IThemeService,
++	) {
++		super();
++
++		// Tooling hook (also outside the phone layout): run any workbench command from the host.
++		(mainWindow as unknown as { __ccDev: unknown }).__ccDev = {
++			runCommand: (id: string, ...args: unknown[]) => this.commandService.executeCommand(id, ...args),
++		};
++
++		if (!this.mobileLayoutService.isPhoneLayout) {
++			return;
++		}
++
++		// The native app calls this to switch screens.
++		(mainWindow as unknown as { __ccNav: unknown }).__ccNav = {
++			activate: (id: string) => this.activate(id),
++			refresh: () => this.publishScheduler.schedule(0),
++			// For tests and tooling: run any workbench command from the host.
++			runCommand: (id: string, ...args: unknown[]) => this.commandService.executeCommand(id, ...args),
++			pickResult: (id: string, path: string | null) => nativeResourcePicker.resolve(id, path),
++		};
++
++		this.lifecycleService.when(LifecyclePhase.Ready).then(() => {
++			// The native bar replaces the activity bar. (The grid only exists from the Ready phase on.)
++			this.layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
++		});
++
++		// Restoring the workbench reopens its default parts, so choose the first screen afterwards.
++		this.lifecycleService.when(LifecyclePhase.Restored).then(() => {
++			this.mobileLayoutService.setMobileDestination('editor');
++			this.publishScheduler.schedule(0);
++
++			// Then follow the user: opening a file from Files or Search should show the file.
++			mainWindow.setTimeout(() => {
++				this._register(this.editorService.onDidActiveEditorChange(() => {
++					if (this.editorService.activeEditor && this.mobileLayoutService.mobileDestination === 'sidebar') {
++						this.mobileLayoutService.setMobileDestination('editor');
++					}
++				}));
++			}, 1500);
++		});
++
++		// Let the native bar and safe areas follow the workbench theme.
++		this._register(this.themeService.onDidColorThemeChange(() => this.publishTheme()));
++		this.lifecycleService.when(LifecyclePhase.Restored).then(() => mainWindow.setTimeout(() => this.publishTheme(), 500));
++
++		// Keep the list and the highlighted item current.
++		this._register(this.mobileLayoutService.onDidChangeMobileDestination(() => this.publishActive()));
++		this._register(this.paneCompositeService.onDidPaneCompositeOpen(() => { this.publishActive(); this.publishScheduler.schedule(); }));
++		this._register(this.paneCompositeService.onDidPaneCompositeClose(() => this.publishActive()));
++		this._register(this.viewDescriptorService.onDidChangeViewContainers(() => this.publishScheduler.schedule()));
++		this._register(this.editorService.onDidActiveEditorChange(() => this.publishScheduler.schedule()));
++		this._register(this.editorService.onDidCloseEditor(() => this.publishScheduler.schedule()));
++		this._register(this.editorService.onDidVisibleEditorsChange(() => this.publishScheduler.schedule()));
++		// Extensions contribute their views late, so containers appear (and fill with views) over time.
++		for (const { location } of LOCATION_INFO) {
++			for (const container of this.viewDescriptorService.getViewContainersByLocation(location)) {
++				this.watchContainer(container);
++			}
++		}
++		this._register(this.viewDescriptorService.onDidChangeViewContainers(e => e.added.forEach(a => this.watchContainer(a.container))));
++	}
++
++	private readonly watched = new Set<string>();
++
++	private watchContainer(container: ViewContainer): void {
++		if (this.watched.has(container.id)) {
++			return;
++		}
++		this.watched.add(container.id);
++		this._register(this.viewDescriptorService.getViewContainerModel(container).onDidChangeActiveViewDescriptors(() => this.publishScheduler.schedule()));
++	}
++
++	// MARK: Switching
++
++	private async activate(id: string): Promise<void> {
++		if (id === EDITOR_ID) {
++			this.mobileLayoutService.setMobileDestination('editor');
++			return;
++		}
++
++		if (id.startsWith(FILE_PREFIX)) {
++			const resource = URI.parse(id.slice(FILE_PREFIX.length));
++			this.mobileLayoutService.setMobileDestination('editor');
++			await this.editorService.openEditor({ resource });
++			return;
++		}
++
++		if (id.startsWith(CONTAINER_PREFIX)) {
++			const [, key, ...rest] = id.split(':');
++			const containerId = rest.join(':');
++			const info = LOCATION_INFO.find(i => i.key === key);
++			if (!info) {
++				return;
++			}
++			this.mobileLayoutService.setMobileDestination(info.destination);
++			await this.paneCompositeService.openPaneComposite(containerId, info.location, true);
++			if (containerId === 'terminal') {
++				await this.commandService.executeCommand('workbench.action.terminal.focus');
++			}
++		}
++	}
++
++	// MARK: Reporting
++
++	private post(message: unknown): void {
++		const host = (mainWindow as unknown as { webkit?: { messageHandlers?: { cc?: INativeHost } } }).webkit?.messageHandlers?.cc;
++		host?.postMessage(message);
++	}
++
++	private computeActive(): string | undefined {
++		switch (this.mobileLayoutService.mobileDestination) {
++			case 'editor':
++				return EDITOR_ID;
++			case 'sidebar':
++				return this.activeContainerId(ViewContainerLocation.Sidebar, 'sidebar');
++			case 'panel':
++				return this.activeContainerId(ViewContainerLocation.Panel, 'panel');
++			case 'auxiliarybar':
++				return this.activeContainerId(ViewContainerLocation.AuxiliaryBar, 'auxiliarybar');
++			default:
++				return undefined;
++		}
++	}
++
++	private activeContainerId(location: ViewContainerLocation, key: string): string | undefined {
++		const id = this.paneCompositeService.getActivePaneComposite(location)?.getId();
++		return id ? `${CONTAINER_PREFIX}${key}:${id}` : undefined;
++	}
++
++	private publishTheme(): void {
++		const style = mainWindow.getComputedStyle(this.layoutService.mainContainer);
++		const read = (name: string) => style.getPropertyValue(name).trim() || undefined;
++		this.post({
++			nav: 'theme',
++			top: read('--vscode-titleBar-activeBackground') ?? read('--vscode-editor-background'),
++			bottom: read('--vscode-sideBar-background') ?? read('--vscode-editor-background'),
++		});
++	}
++
++	private publishActive(): void {
++		const active = this.computeActive();
++		if (active !== this.lastActive) {
++			this.lastActive = active;
++			this.post({ nav: 'active', id: active ?? null });
++		}
++	}
++
++	private async publish(): Promise<void> {
++		const destinations: IDestination[] = [{ id: EDITOR_ID, title: 'Editor', group: 'core', symbol: 'code' }];
++
++		for (const { location, key, group } of LOCATION_INFO) {
++			for (const container of this.viewDescriptorService.getViewContainersByLocation(location)) {
++				if (this.viewDescriptorService.getViewContainerModel(container).activeViewDescriptors.length === 0) {
++					continue;
++				}
++				const entry: IDestination = {
++					id: `${CONTAINER_PREFIX}${key}:${container.id}`,
++					title: typeof container.title === 'string' ? container.title : container.title.value,
++					group,
++					symbol: ThemeIcon.isThemeIcon(container.icon) ? container.icon.id : undefined,
++				};
++				if (container.icon && !ThemeIcon.isThemeIcon(container.icon)) {
++					entry.icon = await this.rasterize(container.icon);
++				}
++				destinations.push(entry);
++			}
++		}
++
++		const seen = new Set<string>();
++		for (const editor of this.editorService.editors) {
++			const resource = editor.resource;
++			if (!resource || seen.has(resource.toString()) || seen.size >= 30) {
++				continue;
++			}
++			seen.add(resource.toString());
++			destinations.push({ id: `${FILE_PREFIX}${resource.toString()}`, title: editor.getName(), group: 'files' });
++		}
++
++		this.destinations = destinations;
++		this.post({ nav: 'destinations', items: destinations });
++		this.lastActive = undefined;
++		this.publishActive();
++	}
++
++	/** Extension icons are images behind a URL; hand the app a small PNG it can tint as a template. */
++	private rasterize(icon: URI | { dark?: URI; light?: URI }): Promise<string | undefined> {
++		const uri = URI.isUri(icon) ? icon : (icon.dark ?? icon.light);
++		if (!uri) {
++			return Promise.resolve(undefined);
++		}
++		const key = uri.toString();
++		let cached = this.iconCache.get(key);
++		if (!cached) {
++			cached = new Promise<string | undefined>(resolve => {
++				const image = new Image();
++				image.onload = () => {
++					try {
++						const canvas = mainWindow.document.createElement('canvas');
++						canvas.width = canvas.height = 96;
++						canvas.getContext('2d')?.drawImage(image, 0, 0, 96, 96);
++						resolve(canvas.toDataURL('image/png'));
++					} catch {
++						resolve(undefined);
++					}
++				};
++				image.onerror = () => resolve(undefined);
++				image.src = FileAccess.uriToBrowserUri(uri).toString(true);
++			});
++			this.iconCache.set(key, cached);
++		}
++		return cached;
++	}
++}
+diff --git a/src/vs/workbench/contrib/remote/browser/remote.ts b/src/vs/workbench/contrib/remote/browser/remote.ts
+index 2d7e4bb96ef..d0b39b7ea01 100644
+--- a/src/vs/workbench/contrib/remote/browser/remote.ts
++++ b/src/vs/workbench/contrib/remote/browser/remote.ts
+@@ -889,6 +889,15 @@ export class RemoteAgentConnectionStatusListener extends Disposable implements I
+ 			// ReconnectionRunning -> ConnectionGain, ReconnectionPermanentFailure
+ 
+ 			this._register(connection.onDidStateChange((e) => {
++				// Inside the iOS app the native side shows connection status (a banner), not a modal dialog.
++				const native = (mainWindow as unknown as { __ccNav?: unknown; webkit?: { messageHandlers?: { cc?: { postMessage(message: unknown): void } } } });
++				if (native.__ccNav && native.webkit?.messageHandlers?.cc) {
++					const state = e.type === PersistentConnectionEventType.ConnectionGain ? 'connected'
++						: e.type === PersistentConnectionEventType.ReconnectionPermanentFailure ? 'failed' : 'reconnecting';
++					native.webkit.messageHandlers.cc.postMessage({ nav: 'connection', state });
++					return;
++				}
++
+ 				visibleProgress?.stopTimer();
+ 				disposableListener.clear();
+ 
+diff --git a/src/vs/workbench/services/dialogs/browser/abstractFileDialogService.ts b/src/vs/workbench/services/dialogs/browser/abstractFileDialogService.ts
+index dbab19f2050..ad062d8b4e7 100644
+--- a/src/vs/workbench/services/dialogs/browser/abstractFileDialogService.ts
++++ b/src/vs/workbench/services/dialogs/browser/abstractFileDialogService.ts
+@@ -3,6 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
++import { nativeResourcePicker } from './nativeResourcePicker.js';
+ import * as nls from '../../../../nls.js';
+ import { IWindowOpenable, isWorkspaceToOpen, isFileToOpen } from '../../../../platform/window/common/window.js';
+ import { IPickAndOpenOptions, ISaveDialogOptions, IOpenDialogOptions, FileFilter, IFileDialogService, IDialogService, ConfirmResult, getFileNamesMessage } from '../../../../platform/dialogs/common/dialogs.js';
+@@ -328,6 +329,17 @@ export abstract class AbstractFileDialogService implements IFileDialogService {
+ 	}
+ 
+ 	private pickResource(options: IOpenDialogOptions): Promise<URI[] | undefined> {
++		// Inside the iOS app the picker is a native, touch-friendly browser of the remote host.
++		if (nativeResourcePicker.isAvailable) {
++			return nativeResourcePicker.pick({
++				canSelectFiles: !!options.canSelectFiles,
++				canSelectFolders: !!options.canSelectFolders,
++				title: options.title,
++				defaultUri: options.defaultUri,
++				remoteAuthority: this.environmentService.remoteAuthority,
++			});
++		}
++
+ 		return this.getSimpleFileDialog().showOpenDialog(options);
+ 	}
+ 
+diff --git a/src/vs/workbench/services/dialogs/browser/nativeResourcePicker.ts b/src/vs/workbench/services/dialogs/browser/nativeResourcePicker.ts
+new file mode 100644
+index 00000000000..576a65b42f7
+--- /dev/null
++++ b/src/vs/workbench/services/dialogs/browser/nativeResourcePicker.ts
+@@ -0,0 +1,77 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { mainWindow } from '../../../../base/browser/window.js';
++import { generateUuid } from '../../../../base/common/uuid.js';
++import { Schemas } from '../../../../base/common/network.js';
++import { URI } from '../../../../base/common/uri.js';
++
++/**
++ * When the workbench runs inside the iOS app, file and folder pickers are shown by the app (a
++ * touch-friendly browser of the remote host) instead of the desktop-style quick-input dialog.
++ */
++
++interface INativeHost {
++	postMessage(message: unknown): void;
++}
++
++export interface INativePickOptions {
++	readonly canSelectFiles: boolean;
++	readonly canSelectFolders: boolean;
++	readonly title?: string;
++	readonly defaultUri?: URI;
++	readonly remoteAuthority?: string;
++}
++
++class NativeResourcePicker {
++
++	private readonly pending = new Map<string, (path: string | undefined) => void>();
++
++	private get host(): INativeHost | undefined {
++		const win = mainWindow as unknown as { webkit?: { messageHandlers?: { cc?: INativeHost } }; __ccNav?: unknown };
++		// `__ccNav` only exists once the phone layout is active inside the app.
++		return win.__ccNav ? win.webkit?.messageHandlers?.cc : undefined;
++	}
++
++	get isAvailable(): boolean {
++		return !!this.host;
++	}
++
++	async pick(options: INativePickOptions): Promise<URI[] | undefined> {
++		const host = this.host;
++		if (!host) {
++			return undefined;
++		}
++
++		const id = generateUuid();
++		const result = new Promise<string | undefined>(resolve => this.pending.set(id, resolve));
++		host.postMessage({
++			nav: 'pick',
++			id,
++			mode: options.canSelectFolders && options.canSelectFiles ? 'any' : options.canSelectFolders ? 'folder' : 'file',
++			title: options.title,
++			path: options.defaultUri?.path,
++		});
++
++		const path = await result;
++		if (!path) {
++			return undefined;
++		}
++		return [options.remoteAuthority
++			? URI.from({ scheme: Schemas.vscodeRemote, authority: options.remoteAuthority, path })
++			: URI.file(path)];
++	}
++
++	/** Called by the app with the chosen path, or nothing if the user cancelled. */
++	resolve(id: string, path: string | null | undefined): void {
++		const resolve = this.pending.get(id);
++		if (resolve) {
++			this.pending.delete(id);
++			resolve(path ?? undefined);
++		}
++	}
++}
++
++export const nativeResourcePicker = new NativeResourcePicker();
+diff --git a/src/vs/workbench/services/layout/browser/mobileLayoutService.ts b/src/vs/workbench/services/layout/browser/mobileLayoutService.ts
+new file mode 100644
+index 00000000000..09220e29972
+--- /dev/null
++++ b/src/vs/workbench/services/layout/browser/mobileLayoutService.ts
+@@ -0,0 +1,34 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Event } from '../../../../base/common/event.js';
++import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
++
++/**
++ * On a phone only one part of the workbench is on screen at a time. A destination is the part
++ * that currently fills the screen.
++ */
++export type MobileDestination = 'sidebar' | 'editor' | 'panel' | 'auxiliarybar';
++
++/** Viewports up to this width (CSS px) use the phone layout. */
++export const PHONE_MAX_WIDTH = 700;
++
++export const IMobileLayoutService = createDecorator<IMobileLayoutService>('mobileLayoutService');
++
++export interface IMobileLayoutService {
++
++	readonly _serviceBrand: undefined;
++
++	/** True when the workbench was started in a phone-sized viewport. Decided once at startup. */
++	readonly isPhoneLayout: boolean;
++
++	/** The part currently filling the screen, or `undefined` before the phone layout is applied. */
++	readonly mobileDestination: MobileDestination | undefined;
++
++	readonly onDidChangeMobileDestination: Event<MobileDestination | undefined>;
++
++	/** Show exactly one part, full screen, and hide the others. */
++	setMobileDestination(destination: MobileDestination): void;
++}
+diff --git a/src/vs/workbench/workbench.web.main.ts b/src/vs/workbench/workbench.web.main.ts
+index ae70f3428ee..c7eed3df1a1 100644
+--- a/src/vs/workbench/workbench.web.main.ts
++++ b/src/vs/workbench/workbench.web.main.ts
+@@ -163,6 +163,7 @@ import './contrib/extensions/browser/extensions.web.contribution.js';
+ 
+ // Terminal
+ import './contrib/terminal/browser/terminal.web.contribution.js';
++import './contrib/mobile/browser/mobile.contribution.js';
+ import './contrib/externalTerminal/browser/externalTerminal.contribution.js';
+ import './contrib/terminal/browser/terminalInstanceService.js';
+ 

@@ -1,0 +1,7 @@
+# Build output, the VS Code checkout and the local test host (see README.md)
+.build/
+# Attachments the app copies into a project when you send them in a chat (this repo is often one)
+.codechote-attachments/
+.DS_Store
+# Personal Claude Code settings
+.claude/settings.local.json

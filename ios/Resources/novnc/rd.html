@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes, viewport-fit=cover">
+<title>Remote screen</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; overflow: hidden; -webkit-user-select: none; user-select: none; }
+  #wrap { position: absolute; inset: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
+  #screen { width: 100%; height: 100%; }
+  /* Pan/zoom mode: touches go to the page (native scrolling and pinch) instead of the remote mouse. */
+  body.view #screen canvas { pointer-events: none; }
+  #kbd { position: fixed; left: -1000px; top: 0; width: 1px; height: 1px; opacity: 0; }
+  /* The keyboard can only be raised from a tap inside the page, so this button lives here. */
+  #kbbtn { position: fixed; right: 14px; bottom: calc(14px + env(safe-area-inset-bottom)); width: 48px; height: 48px;
+           border: 0; border-radius: 24px; background: rgba(255,255,255,.2); color: #fff; font-size: 22px; z-index: 10;
+           -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="screen"></div></div>
+<textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+<button id="kbbtn" aria-label="Keyboard">&#9000;</button>
+<script type="module">
+import RFB from './core/rfb.js';
+
+const post = (message) => { try { window.webkit.messageHandlers.rd.postMessage(message); } catch (_) {} };
+for (const level of ['error', 'warn']) {
+  const original = console[level];
+  console[level] = (...args) => { post({ type: 'log', text: level + ': ' + args.map(String).join(' ') }); original.apply(console, args); };
+}
+window.addEventListener('error', (e) => post({ type: 'log', text: 'uncaught: ' + e.message + ' @ ' + e.filename + ':' + e.lineno }));
+const KEYS = {
+  Escape: 0xFF1B, Tab: 0xFF09, Enter: 0xFF0D, Backspace: 0xFF08, Delete: 0xFFFF,
+  Home: 0xFF50, End: 0xFF57, PageUp: 0xFF55, PageDown: 0xFF56,
+  ArrowLeft: 0xFF51, ArrowUp: 0xFF52, ArrowRight: 0xFF53, ArrowDown: 0xFF54,
+  Shift: 0xFFE1, Control: 0xFFE3, Alt: 0xFFE9, Meta: 0xFFEB,
+};
+for (let i = 1; i <= 12; i++) KEYS['F' + i] = 0xFFBE + i - 1;
+const MODIFIERS = ['Shift', 'Control', 'Alt', 'Meta'];
+
+let rfb = null;
+let held = new Set();      // modifiers switched on from the app's key bar, released after the next key
+
+function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  rfb = new RFB(document.getElementById('screen'), `${scheme}://${location.host}/websockify`, { shared: true });
+  rfb.scaleViewport = true;
+  rfb.resizeSession = false;
+  rfb.showDotCursor = true;
+  rfb.addEventListener('connect', () => post({ type: 'connect' }));
+  rfb.addEventListener('disconnect', (e) => post({ type: 'disconnect', clean: !!e.detail.clean }));
+  rfb.addEventListener('credentialsrequired', (e) => post({ type: 'credentials', needs: e.detail.types }));
+  rfb.addEventListener('securityfailure', (e) => post({ type: 'securityfailure', reason: (e.detail && e.detail.reason) || '' }));
+  rfb.addEventListener('desktopname', (e) => post({ type: 'name', name: e.detail.name }));
+  rfb.addEventListener('clipboard', (e) => post({ type: 'clipboard', text: e.detail.text }));
+}
+
+function press(name) {
+  const keysym = KEYS[name];
+  if (!rfb || keysym === undefined) return;
+  rfb.sendKey(keysym, name, true);
+  rfb.sendKey(keysym, name, false);
+}
+
+// A typed character, with any modifiers held from the key bar.
+function typeCharacter(character) {
+  if (!rfb) return;
+  const code = character.codePointAt(0);
+  const keysym = code < 0x100 ? code : 0x01000000 + code;
+  rfb.sendKey(keysym, '', true);
+  rfb.sendKey(keysym, '', false);
+  releaseHeld();
+}
+
+function releaseHeld() {
+  for (const name of held) rfb.sendKey(KEYS[name], name, false);
+  held.clear();
+  post({ type: 'modifiers', held: [] });
+}
+
+window.cc = {
+  credentials(username, password) { if (rfb) rfb.sendCredentials({ username, password }); },
+  press(name) { press(name); if (held.size) releaseHeld(); },
+  toggleModifier(name) {
+    if (!rfb || !MODIFIERS.includes(name)) return;
+    if (held.has(name)) { held.delete(name); rfb.sendKey(KEYS[name], name, false); }
+    else { held.add(name); rfb.sendKey(KEYS[name], name, true); }
+    post({ type: 'modifiers', held: [...held] });
+  },
+  ctrlAltDel() { if (rfb) rfb.sendCtrlAltDel(); },
+  paste(text) { if (rfb) rfb.clipboardPasteFrom(text); },
+  mode(name) { document.body.classList.toggle('view', name === 'view'); },
+  fit(on) { if (!rfb) return; rfb.scaleViewport = on; rfb.clipViewport = !on; },
+  hideKeyboard() { document.getElementById('kbd').blur(); },
+  disconnect() { if (rfb) rfb.disconnect(); },
+  reconnect() { document.getElementById('screen').innerHTML = ''; connect(); },
+};
+
+const kbd = document.getElementById('kbd');
+kbd.addEventListener('keydown', (e) => {
+  if (KEYS[e.key] !== undefined && e.key.length > 1) { press(e.key); if (held.size) releaseHeld(); e.preventDefault(); }
+});
+kbd.addEventListener('input', (e) => {
+  if (e.data) for (const character of e.data) typeCharacter(character);
+  kbd.value = '';
+});
+document.getElementById('kbbtn').addEventListener('click', () => { if (document.activeElement === kbd) kbd.blur(); else kbd.focus(); });
+kbd.addEventListener('blur', () => post({ type: 'keyboard', shown: false }));
+kbd.addEventListener('focus', () => post({ type: 'keyboard', shown: true }));
+
+connect();
+</script>
+</body>
+</html>

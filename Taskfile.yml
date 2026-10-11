@@ -1,0 +1,170 @@
+# Everyday commands for Codechote. Run `task` to list them, `task <name> -- <args>` to pass arguments.
+# Needs: Xcode 26+, Homebrew. `task setup` installs the rest.
+version: "3"
+
+vars:
+  IOS: ios
+  # The simulator to use: a name ("iPhone 18 Pro") or UDID. Empty picks a booted iPhone, else the newest one.
+  SIM: '{{.SIM | default ""}}'
+
+env:
+  PATH: /opt/homebrew/bin:/usr/local/bin:{{env "PATH"}}
+  SIM: "{{.SIM}}"
+
+tasks:
+  default:
+    desc: List the commands
+    silent: true
+    cmds:
+      - task --list
+
+  # ---- Setup -------------------------------------------------------------------------------------------
+
+  setup:
+    desc: "Install what the build needs (XcodeGen, SwiftTerm's Metal toolchain) and generate the Xcode project"
+    cmds:
+      - command -v xcodegen >/dev/null || brew install xcodegen
+      - xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - task: gen
+      - task: doctor
+
+  doctor:
+    desc: Check the tools, the workbench bundle, the test host and the connected iPhone
+    silent: true
+    cmds:
+      - |
+        ok() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+        no() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+        xcodebuild -version >/dev/null 2>&1 && ok "$(xcodebuild -version | head -1)" || no "Xcode not found"
+        command -v xcodegen >/dev/null && ok "XcodeGen $(xcodegen --version 2>/dev/null | awk '{print $NF}')" || no "XcodeGen missing (task setup)"
+        [ -f ios/Resources/vscode-web/ui-commit.txt ] && ok "VS Code workbench bundle $(cut -c1-7 ios/Resources/vscode-web/ui-commit.txt)" || no "No workbench bundle: VS Code screens won't load (task workbench:build)"
+        SIMID=$(ios/scripts/simulator.sh 2>/dev/null) && ok "Simulator $SIMID" || no "No iPhone simulator found"
+        lsof -nP -iTCP:2222 -sTCP:LISTEN >/dev/null 2>&1 && ok "Test host running on 127.0.0.1:2222" || no "Test host stopped (task host:start)"
+        DEV=$(xcrun devicectl list devices 2>/dev/null | awk '/physical/ && /available|connected/ {print $1" "$2; exit}')
+        [ -n "$DEV" ] && ok "iPhone connected: $DEV" || no "No iPhone connected (needed for task install)"
+
+  gen:
+    desc: Regenerate the Xcode project from ios/project.yml (after adding or moving files)
+    dir: "{{.IOS}}"
+    cmds:
+      - xcodegen generate --quiet
+
+  open:
+    desc: Open the project in Xcode
+    deps: [gen]
+    cmds:
+      - open {{.IOS}}/Codechote.xcodeproj
+
+  # ---- Build, run, test --------------------------------------------------------------------------------
+
+  build:
+    desc: Build for the simulator (no signing); prints only errors
+    deps: [gen]
+    dir: "{{.IOS}}"
+    cmds:
+      - |
+        xcodebuild -project Codechote.xcodeproj -scheme Codechote -destination 'generic/platform=iOS Simulator' \
+          -derivedDataPath ../.build/sim/dd -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build 2>&1 \
+          | grep -E "^\*\* BUILD| error: " | sort -u | cut -c1-300
+
+  run:
+    desc: "Start the test host, then build and run in the simulator. Launch options: task run -- -devOpenChat 0"
+    deps: [host:start]
+    cmds:
+      - ios/scripts/sim.sh - 0 {{.CLI_ARGS}}
+
+  shot:
+    desc: "Build, run and save a screenshot to .build/shot.png. Options: task shot -- -devHomeTab projects"
+    deps: [host:start]
+    cmds:
+      - ios/scripts/sim.sh .build/shot.png 12 {{.CLI_ARGS}}
+      - "[ -n \"$CI\" ] || open .build/shot.png"
+
+  logs:
+    desc: Follow the app's console in the simulator (from the last task run)
+    cmds:
+      - tail -f .build/sim/sim-console.log
+
+  test:
+    desc: "Run the unit tests. One suite: task test -- -only-testing:CodechoteTests/ChatItemTests"
+    cmds:
+      - ios/scripts/test.sh {{.CLI_ARGS}}
+
+  test:integration:
+    desc: Unit tests plus the integration tests over real SSH against the local test host
+    deps: [host:start]
+    cmds:
+      - INTEGRATION=1 ios/scripts/test.sh {{.CLI_ARGS}}
+
+  test:ui:
+    desc: "End-to-end UI tests: the app driven against the local test host (a few minutes)"
+    deps: [host:start]
+    cmds:
+      - SCHEME=CodechoteUI INTEGRATION=1 ios/scripts/test.sh {{.CLI_ARGS}}
+
+  test:all:
+    desc: Every test there is (unit, integration, UI, Windows scripts when PowerShell is installed)
+    cmds:
+      - task: test:integration
+      - task: test:ui
+      - "command -v pwsh >/dev/null && scripts/test-windows-scripts.sh || echo 'PowerShell not installed: Windows script checks skipped (brew install powershell).'"
+
+  install:
+    desc: Build, install and launch on the connected iPhone (unlocked and trusted; run from Terminal.app)
+    cmds:
+      - ios/scripts/install.sh
+
+  # ---- Local test host ---------------------------------------------------------------------------------
+
+  host:start:
+    desc: Start the local SSH test host (127.0.0.1:2222, fake agents, a sample repo)
+    status:
+      - lsof -nP -iTCP:2222 -sTCP:LISTEN >/dev/null 2>&1
+    cmds:
+      - scripts/testhost.sh start
+
+  host:stop:
+    desc: Stop the test host
+    cmds:
+      - scripts/testhost.sh stop
+
+  host:reset:
+    desc: Restart the test host with fresh fixtures (clears its agent conversations)
+    cmds:
+      - rm -f .build/testhost/sshd_config
+      - scripts/testhost.sh reset
+
+  # ---- VS Code workbench (the VS Code screens of a project) ---------------------------------------------
+
+  workbench:build:
+    desc: Fetch the pinned VS Code, apply the patches, build the web UI and copy it into the app (slow the first time)
+    cmds:
+      - workbench/build.sh {{.CLI_ARGS}}
+
+  workbench:quick:
+    desc: Rebuild only the workbench bundle (after changing patched VS Code code)
+    cmds:
+      - QUICK=1 workbench/build.sh
+
+  workbench:save-patches:
+    desc: Save edits made in .build/vscode-<ref> back into workbench/patches
+    cmds:
+      - workbench/save-patches.sh
+
+  # ---- Other -------------------------------------------------------------------------------------------
+
+  icon:
+    desc: Regenerate the app icon
+    cmds:
+      - swift scripts/make-icon.swift
+
+  test:windows:
+    desc: Check the Windows host scripts with PowerShell 7 (brew install powershell)
+    cmds:
+      - scripts/test-windows-scripts.sh
+
+  clean:
+    desc: Remove build output (keeps the test host, the VS Code checkout and the workbench bundle)
+    cmds:
+      - rm -rf .build/sim .build/test .build/device-build .build/shot.png
+      - rm -rf {{.IOS}}/Codechote.xcodeproj

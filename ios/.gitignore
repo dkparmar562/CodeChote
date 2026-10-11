@@ -1,0 +1,5 @@
+Codechote.xcodeproj/
+build/
+DerivedData/
+*.xcuserstate
+Resources/vscode-web/
